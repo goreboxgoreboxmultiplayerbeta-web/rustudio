@@ -26,18 +26,18 @@ jobs:
             "ndk;28.2.13676358"
 
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
 
-      - name: Install Cargo APK
-        run: cargo install cargo-apk --locked
+      - name: Install Cargo NDK
+        run: cargo install cargo-ndk --locked
 
-      - name: Build APK
+      - name: Compile RuStudio Android
         run: |
-          cargo apk build --target aarch64-linux-android
+          cargo ndk -t arm64-v8a -p 26 build \
+            --package rustudio --lib
 
-      - name: Upload APK
+      - name: Upload Android Library
         uses: actions/upload-artifact@v4
         with:
-          name: RuStudio-Android
-          path: target/**/*.apk
+          name: RuStudio-ARM64
+          path: target/aarch64-linux-android/debug/librustudio.so
           if-no-files-found: error
