@@ -1,4 +1,191 @@
+name: Build Android
 
+on:
+  workflow_dispatch:
+
+jobs:
+  android:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools'
+
+      - name: Install SDK and NDK
+        run: |
+          sdkmanager "platforms;android-35" \
+            "build-tools;35.0.0" \
+            "ndk;28.2.13676358"
+
+          NDK="$ANDROID_HOME/ndk/28.2.13676358"
+
+          echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$NDK" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK=$NDK" >> "$GITHUB_ENV"
+          echo "CARGO_NDK_PLATFORM=26" >> "$GITHUB_ENV"
+
+      - name: Install Cargo NDK
+        run: |
+          cargo install cargo-ndk --version 4.1.2 --locked
+
+      - name: Download dependencies
+        run: |
+          cargo fetch --target aarch64-linux-android
+
+      - name: Fix RFD for Android
+        run: |
+          python3 <<'PYTHON'
+          import os
+          import shutil
+          from pathlib import Path
+
+          cargo_home = Path(
+              os.environ.get("CARGO_HOME", Path.home() / ".cargo")
+          )
+
+          sources = list(
+              (cargo_home / "registry" / "src").glob(
+                  "*/rfd-0.15.4"
+              )
+          )
+
+          if not sources:
+              raise RuntimeError("rfd 0.15.4 not found")
+
+          dst = Path("vendor/rfd-android")
+
+          if dst.exists():
+              shutil.rmtree(dst)
+
+          shutil.copytree(sources[0], dst)
+
+          backend = dst / "src" / "backend.rs"
+
+          patch = r'''
+
+          #[cfg(target_os = "android")]
+          mod android_compat {
+              use super::*;
+              use crate::{FileDialog, MessageDialog};
+
+              impl FilePickerDialogImpl for FileDialog {
+                  fn pick_file(self) -> Option<PathBuf> {
+                      None
+                  }
+
+                  fn pick_files(self) -> Option<Vec<PathBuf>> {
+                      None
+                  }
+              }
+
+              impl FolderPickerDialogImpl for FileDialog {
+                  fn pick_folder(self) -> Option<PathBuf> {
+                      None
+                  }
+
+                  fn pick_folders(self) -> Option<Vec<PathBuf>> {
+                      None
+                  }
+              }
+
+              impl FileSaveDialogImpl for FileDialog {
+                  fn save_file(self) -> Option<PathBuf> {
+                      None
+                  }
+              }
+
+              impl MessageDialogImpl for MessageDialog {
+                  fn show(self) -> MessageDialogResult {
+                      MessageDialogResult::Cancel
+                  }
+              }
+
+              impl AsyncFilePickerDialogImpl for FileDialog {
+                  fn pick_file_async(self)
+                      -> DialogFutureType<Option<FileHandle>>
+                  {
+                      Box::pin(async { None })
+                  }
+
+                  fn pick_files_async(self)
+                      -> DialogFutureType<Option<Vec<FileHandle>>>
+                  {
+                      Box::pin(async { None })
+                  }
+              }
+
+              impl AsyncFolderPickerDialogImpl for FileDialog {
+                  fn pick_folder_async(self)
+                      -> DialogFutureType<Option<FileHandle>>
+                  {
+                      Box::pin(async { None })
+                  }
+
+                  fn pick_folders_async(self)
+                      -> DialogFutureType<Option<Vec<FileHandle>>>
+                  {
+                      Box::pin(async { None })
+                  }
+              }
+
+              impl AsyncFileSaveDialogImpl for FileDialog {
+                  fn save_file_async(self)
+                      -> DialogFutureType<Option<FileHandle>>
+                  {
+                      Box::pin(async { None })
+                  }
+              }
+
+              impl AsyncMessageDialogImpl for MessageDialog {
+                  fn show_async(self)
+                      -> DialogFutureType<MessageDialogResult>
+                  {
+                      Box::pin(async {
+                          MessageDialogResult::Cancel
+                      })
+                  }
+              }
+          }
+          '''
+
+          with backend.open("a") as f:
+              f.write(patch)
+
+          manifest = Path("Cargo.toml")
+          text = manifest.read_text()
+
+          section = "[patch.crates-io]"
+          entry = 'rfd = { path = "vendor/rfd-android" }'
+
+          if section in text:
+              text = text.replace(
+                  section,
+                  section + "\n" + entry,
+                  1
+              )
+          else:
+              text += "\n" + section + "\n" + entry + "\n"
+
+          manifest.write_text(text)
+
+          print("Android RFD compatibility patch applied")
+          PYTHON
+
+      - name: Compile RuStudio Android
+        run: |
+          cargo ndk -t arm64-v8a \
+            -o android-libs \
+            build --package rustudio --lib
+
+      
       - name: Compile RuStudio Android
         env:
           CARGO_PROFILE_RELEASE_DEBUG: "0"
@@ -110,3 +297,5 @@
           name: RuStudio-Mobile-APK
           path: output/RuStudio-Mobile.apk
           if-no-files-found: error
+          
+          
