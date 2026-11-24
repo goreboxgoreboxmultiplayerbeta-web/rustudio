@@ -46,7 +46,18 @@ pub fn run(
     if let Some(hook) = options.event_loop_builder.take() {
         hook(&mut builder);
     }
-    let event_loop = builder.build()?;
+    #[cfg(target_os = "android")]
+{
+    use winit::platform::android::EventLoopBuilderExtAndroid;
+
+    let app = crate::MOBILE_APP.with(|slot| {
+        slot.borrow().as_ref().cloned()
+    }).expect("AndroidApp not initialized");
+
+    builder.with_android_app(app);
+}
+
+let event_loop = builder.build()?;
     // Mailbox doesn't hold frames back to the refresh: pace them ourselves,
     // except on Wayland where egui-wgpu calls window.pre_present_notify() every
     // frame and winit already holds RedrawRequested until the compositor's
