@@ -1,194 +1,112 @@
 
-name: Build Android
-
-on:
-  workflow_dispatch:
-
-jobs:
-  android:
-    runs-on: ubuntu-24.04
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-linux-android
-
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v4
-        with:
-          packages: 'platform-tools'
-
-      - name: Install SDK and NDK
-        run: |
-          sdkmanager "platforms;android-35" \
-            "build-tools;35.0.0" \
-            "ndk;28.2.13676358"
-
-          NDK="$ANDROID_HOME/ndk/28.2.13676358"
-
-          echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_ROOT=$NDK" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK=$NDK" >> "$GITHUB_ENV"
-          echo "CARGO_NDK_PLATFORM=26" >> "$GITHUB_ENV"
-
-      - name: Install Cargo NDK
-        run: |
-          cargo install cargo-ndk --version 4.1.2 --locked
-
-      - name: Download dependencies
-        run: |
-          cargo fetch --target aarch64-linux-android
-
-      - name: Fix RFD for Android
-        run: |
-          python3 <<'PYTHON'
-          import os
-          import shutil
-          from pathlib import Path
-
-          cargo_home = Path(
-              os.environ.get("CARGO_HOME", Path.home() / ".cargo")
-          )
-
-          sources = list(
-              (cargo_home / "registry" / "src").glob(
-                  "*/rfd-0.15.4"
-              )
-          )
-
-          if not sources:
-              raise RuntimeError("rfd 0.15.4 not found")
-
-          dst = Path("vendor/rfd-android")
-
-          if dst.exists():
-              shutil.rmtree(dst)
-
-          shutil.copytree(sources[0], dst)
-
-          backend = dst / "src" / "backend.rs"
-
-          patch = r'''
-
-          #[cfg(target_os = "android")]
-          mod android_compat {
-              use super::*;
-              use crate::{FileDialog, MessageDialog};
-
-              impl FilePickerDialogImpl for FileDialog {
-                  fn pick_file(self) -> Option<PathBuf> {
-                      None
-                  }
-
-                  fn pick_files(self) -> Option<Vec<PathBuf>> {
-                      None
-                  }
-              }
-
-              impl FolderPickerDialogImpl for FileDialog {
-                  fn pick_folder(self) -> Option<PathBuf> {
-                      None
-                  }
-
-                  fn pick_folders(self) -> Option<Vec<PathBuf>> {
-                      None
-                  }
-              }
-
-              impl FileSaveDialogImpl for FileDialog {
-                  fn save_file(self) -> Option<PathBuf> {
-                      None
-                  }
-              }
-
-              impl MessageDialogImpl for MessageDialog {
-                  fn show(self) -> MessageDialogResult {
-                      MessageDialogResult::Cancel
-                  }
-              }
-
-              impl AsyncFilePickerDialogImpl for FileDialog {
-                  fn pick_file_async(self)
-                      -> DialogFutureType<Option<FileHandle>>
-                  {
-                      Box::pin(async { None })
-                  }
-
-                  fn pick_files_async(self)
-                      -> DialogFutureType<Option<Vec<FileHandle>>>
-                  {
-                      Box::pin(async { None })
-                  }
-              }
-
-              impl AsyncFolderPickerDialogImpl for FileDialog {
-                  fn pick_folder_async(self)
-                      -> DialogFutureType<Option<FileHandle>>
-                  {
-                      Box::pin(async { None })
-                  }
-
-                  fn pick_folders_async(self)
-                      -> DialogFutureType<Option<Vec<FileHandle>>>
-                  {
-                      Box::pin(async { None })
-                  }
-              }
-
-              impl AsyncFileSaveDialogImpl for FileDialog {
-                  fn save_file_async(self)
-                      -> DialogFutureType<Option<FileHandle>>
-                  {
-                      Box::pin(async { None })
-                  }
-              }
-
-              impl AsyncMessageDialogImpl for MessageDialog {
-                  fn show_async(self)
-                      -> DialogFutureType<MessageDialogResult>
-                  {
-                      Box::pin(async {
-                          MessageDialogResult::Cancel
-                      })
-                  }
-              }
-          }
-          '''
-
-          with backend.open("a") as f:
-              f.write(patch)
-
-          manifest = Path("Cargo.toml")
-          text = manifest.read_text()
-
-          section = "[patch.crates-io]"
-          entry = 'rfd = { path = "vendor/rfd-android" }'
-
-          if section in text:
-              text = text.replace(
-                  section,
-                  section + "\n" + entry,
-                  1
-              )
-          else:
-              text += "\n" + section + "\n" + entry + "\n"
-
-          manifest.write_text(text)
-
-          print("Android RFD compatibility patch applied")
-          PYTHON
-
       - name: Compile RuStudio Android
+        env:
+          CARGO_PROFILE_RELEASE_DEBUG: "0"
+          CARGO_PROFILE_RELEASE_LTO: "false"
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
         run: |
           cargo ndk -t arm64-v8a \
             -o android-libs \
-            build --package rustudio --lib
+            build --release --package rustudio --lib
 
-      - name: Upload Android Library
+      - name: Optimize Android Library
+        run: |
+          BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+
+          "$BIN/llvm-strip" --strip-debug \
+            android-libs/arm64-v8a/librustudio.so
+
+          "$BIN/llvm-nm" -D \
+            android-libs/arm64-v8a/librustudio.so \
+            | grep ANativeActivity_onCreate
+
+          ls -lh android-libs/arm64-v8a/
+
+      - name: Create Android APK
+        run: |
+          TOOLS="$ANDROID_HOME/build-tools/35.0.0"
+
+          mkdir -p apk-build/lib/arm64-v8a
+          mkdir -p output
+
+          cp android-libs/arm64-v8a/*.so \
+            apk-build/lib/arm64-v8a/
+
+          cat > apk-build/AndroidManifest.xml <<'XML'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+              package="com.rustudio.mobile"
+              android:versionCode="1"
+              android:versionName="0.1">
+
+              <uses-sdk
+                  android:minSdkVersion="26"
+                  android:targetSdkVersion="35"/>
+
+              <uses-permission android:name="android.permission.INTERNET"/>
+
+              <application
+                  android:label="RuStudio Mobile"
+                  android:hasCode="false"
+                  android:extractNativeLibs="true"
+                  android:theme="@android:style/Theme.Material.NoActionBar.Fullscreen">
+
+                  <activity
+                      android:name="android.app.NativeActivity"
+                      android:exported="true"
+                      android:screenOrientation="landscape"
+                      android:configChanges="orientation|screenSize|keyboardHidden">
+
+                      <meta-data
+                          android:name="android.app.lib_name"
+                          android:value="rustudio"/>
+
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+
+                  </activity>
+              </application>
+          </manifest>
+          XML
+
+          "$TOOLS/aapt2" link \
+            -I "$ANDROID_HOME/platforms/android-35/android.jar" \
+            --manifest apk-build/AndroidManifest.xml \
+            -o apk-build/unsigned.apk
+
+          cd apk-build
+          zip -0 -r unsigned.apk lib
+          cd ..
+
+          "$TOOLS/zipalign" -P 16 -f 4 \
+            apk-build/unsigned.apk \
+            apk-build/aligned.apk
+
+          keytool -genkeypair \
+            -keystore apk-build/debug.keystore \
+            -storepass android \
+            -keypass android \
+            -alias androiddebugkey \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=RuStudio Mobile"
+
+          "$TOOLS/apksigner" sign \
+            --ks apk-build/debug.keystore \
+            --ks-pass pass:android \
+            --key-pass pass:android \
+            --out output/RuStudio-Mobile.apk \
+            apk-build/aligned.apk
+
+          "$TOOLS/apksigner" verify \
+            output/RuStudio-Mobile.apk
+
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: RuStudio-ARM64
-          path: android-libs/
+          name: RuStudio-Mobile-APK
+          path: output/RuStudio-Mobile.apk
           if-no-files-found: error
