@@ -107,7 +107,7 @@ pub fn low_memory() -> bool {
 
 /// The 1-minute load average as text, "?" where unknown.
 pub fn load_average() -> String {
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "android")))]
     {
         let mut l = [0f64; 1];
         // SAFETY: getloadavg writes at most the one entry asked for.
