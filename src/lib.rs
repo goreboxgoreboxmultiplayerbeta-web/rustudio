@@ -1258,3 +1258,34 @@ pub fn run() -> eframe::Result<()> {
     }
     r
 }
+#[cfg(target_os = "android")]
+thread_local! {
+    static MOBILE_APP: std::cell::RefCell<
+        Option<winit::platform::android::activity::AndroidApp>
+    > = std::cell::RefCell::new(None);
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub fn android_main(
+    app: winit::platform::android::activity::AndroidApp
+) {
+    if let Some(path) = app.internal_data_path() {
+        let _ = std::fs::create_dir_all(&path);
+        let _ = std::env::set_current_dir(&path);
+
+        unsafe {
+            std::env::set_var("HOME", &path);
+            std::env::set_var("XDG_DATA_HOME", &path);
+            std::env::set_var("XDG_CONFIG_HOME", &path);
+        }
+    }
+
+    MOBILE_APP.with(|slot| {
+        *slot.borrow_mut() = Some(app);
+    });
+
+    if let Err(error) = run() {
+        eprintln!("RuStudio Android: {error}");
+    }
+}
