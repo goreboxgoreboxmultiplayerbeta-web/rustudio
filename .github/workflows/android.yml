@@ -1,3 +1,4 @@
+
 name: Build Android
 
 on:
@@ -36,9 +37,154 @@ jobs:
         run: |
           cargo install cargo-ndk --version 4.1.2 --locked
 
+      - name: Download dependencies
+        run: |
+          cargo fetch --target aarch64-linux-android
+
+      - name: Fix RFD for Android
+        run: |
+          python3 <<'PYTHON'
+          import os
+          import shutil
+          from pathlib import Path
+
+          cargo_home = Path(
+              os.environ.get("CARGO_HOME", Path.home() / ".cargo")
+          )
+
+          sources = list(
+              (cargo_home / "registry" / "src").glob(
+                  "*/rfd-0.15.4"
+              )
+          )
+
+          if not sources:
+              raise RuntimeError("rfd 0.15.4 not found")
+
+          dst = Path("vendor/rfd-android")
+
+          if dst.exists():
+              shutil.rmtree(dst)
+
+          shutil.copytree(sources[0], dst)
+
+          backend = dst / "src" / "backend.rs"
+
+          patch = r'''
+
+          #[cfg(target_os = "android")]
+          mod android_compat {
+              use super::*;
+              use crate::{FileDialog, MessageDialog};
+
+              impl FilePickerDialogImpl for FileDialog {
+                  fn pick_file(self) -> Option<PathBuf> {
+                      None
+                  }
+
+                  fn pick_files(self) -> Option<Vec<PathBuf>> {
+                      None
+                  }
+              }
+
+              impl FolderPickerDialogImpl for FileDialog {
+                  fn pick_folder(self) -> Option<PathBuf> {
+                      None
+                  }
+
+                  fn pick_folders(self) -> Option<Vec<PathBuf>> {
+                      None
+                  }
+              }
+
+              impl FileSaveDialogImpl for FileDialog {
+                  fn save_file(self) -> Option<PathBuf> {
+                      None
+                  }
+              }
+
+              impl MessageDialogImpl for MessageDialog {
+                  fn show(self) -> MessageDialogResult {
+                      MessageDialogResult::Cancel
+                  }
+              }
+
+              impl AsyncFilePickerDialogImpl for FileDialog {
+                  fn pick_file_async(self)
+                      -> DialogFutureType<Option<FileHandle>>
+                  {
+                      Box::pin(async { None })
+                  }
+
+                  fn pick_files_async(self)
+                      -> DialogFutureType<Option<Vec<FileHandle>>>
+                  {
+                      Box::pin(async { None })
+                  }
+              }
+
+              impl AsyncFolderPickerDialogImpl for FileDialog {
+                  fn pick_folder_async(self)
+                      -> DialogFutureType<Option<FileHandle>>
+                  {
+                      Box::pin(async { None })
+                  }
+
+                  fn pick_folders_async(self)
+                      -> DialogFutureType<Option<Vec<FileHandle>>>
+                  {
+                      Box::pin(async { None })
+                  }
+              }
+
+              impl AsyncFileSaveDialogImpl for FileDialog {
+                  fn save_file_async(self)
+                      -> DialogFutureType<Option<FileHandle>>
+                  {
+                      Box::pin(async { None })
+                  }
+              }
+
+              impl AsyncMessageDialogImpl for MessageDialog {
+                  fn show_async(self)
+                      -> DialogFutureType<MessageDialogResult>
+                  {
+                      Box::pin(async {
+                          MessageDialogResult::Cancel
+                      })
+                  }
+              }
+          }
+          '''
+
+          with backend.open("a") as f:
+              f.write(patch)
+
+          manifest = Path("Cargo.toml")
+          text = manifest.read_text()
+
+          section = "[patch.crates-io]"
+          entry = 'rfd = { path = "vendor/rfd-android" }'
+
+          if section in text:
+              text = text.replace(
+                  section,
+                  section + "\n" + entry,
+                  1
+              )
+          else:
+              text += "\n" + section + "\n" + entry + "\n"
+
+          manifest.write_text(text)
+
+          print("Android RFD compatibility patch applied")
+          PYTHON
+
       - name: Compile RuStudio Android
         run: |
-          cargo ndk -t arm64-v8a -o android-libs build --package rustudio --lib
+          cargo ndk -t arm64-v8a \
+            -o android-libs \
+            build --package rustudio --lib
 
       - name: Upload Android Library
         uses: actions/upload-artifact@v4
